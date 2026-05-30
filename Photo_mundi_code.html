@@ -1,0 +1,840 @@
+
+
+<!DOCTYPE html>
+  <html lang="en">
+  <head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Photo Mundi</title>
+
+<!-- MapLibre -->
+<link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+
+<!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <h4>Photo Mundi</h4>
+<style>
+
+  body { 
+    margin: 0; 
+    font-family: Arial, sans-serif;
+    background: #f5f5f5; display: flex;
+    flex-direction: column; height: 100vh; 
+    }
+  #content { 
+    flex: 1; 
+    padding-bottom: 70px; 
+    overflow-y: auto; 
+  }
+  #map { 
+    width: 100%; 
+    height: calc(100vh - 70px); 
+  }
+  .bottom-nav { 
+    position: fixed; 
+    bottom: 0; left: 0; 
+    width: 100%;
+    height: 70px; 
+    background: #ffffff; 
+    border-top: 1px solid #ccc;
+    display: flex; 
+    justify-content: space-around;
+    align-items: center; 
+  }
+  .nav-btn { 
+    flex: 1; 
+    text-align: center; 
+    padding: 10px 0; 
+    cursor: pointer; 
+    font-size: 14px; 
+    color: #333; 
+  }
+  .nav-btn.active { 
+    color: #007bff; 
+    font-weight: bold; 
+  }
+  form { 
+    padding: 20px; 
+  }
+  input, textarea { 
+    width: 100%; 
+    padding: 10px; 
+    margin: 8px 0; 
+    border: 1px solid #ccc; 
+    border-radius: 5px; 
+  }
+  button { 
+    padding: 10px 14px; 
+    background: #007bff; 
+    color: white;
+    border: none; 
+    border-radius: 5px; 
+    cursor: pointer; 
+    margin-top: 10px; 
+  }
+  .popup-photo { 
+    width: 150px; 
+    border-radius: 6px; 
+    cursor: pointer; 
+    transition: all 0.2s ease; 
+  }
+  .popup-photo.expanded { 
+    width: 300px; 
+    max-width: 90vw; 
+  }
+  #userSuggestions div:hover {
+     background: #f0f0f0; 
+  }
+  .expandable-photo {
+  width: 100px;
+  cursor: pointer;
+  transition: 0.2s ease;
+  }
+.expandable-photo.expanded {
+  width: 300px;
+  max-width: 90vw;
+  }
+  </style>
+</head>
+
+<body>
+
+<div id="content"></div>
+
+<!--Bottom navigation bar-->
+<div class="bottom-nav">
+  <div class="nav-btn active" onclick="showPage('upload')">Upload a Photo</div>
+  <div class="nav-btn" onclick="showPage('map')">Map</div>
+  <div class="nav-btn" onclick="showPage('friends')">Friends</div>
+</div>
+
+<script>
+//Supabase setup
+const { createClient } = supabase;
+
+const SUPABASE_URL = "https://xqpchvtclfszvpugrxig.supabase.co"; //Supabase URL 
+const SUPABASE_ANON_KEY = "sb_publishable_8xOJFVvzmXI0KuFldlLlPQ_4KRkrZzk"; //Supabase Anon key or publishable key
+
+const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+//App state
+let map = null;
+let mapMarkers = [];
+let myMarkers = [];
+let friends = [];
+let activeFriend = null;
+let currentUser = null;
+window.currentMarkers = [];
+
+
+//Db helpers
+async function ensureUser(username) {
+  await db.from("users").upsert({ username });
+}
+
+//Load markers
+async function loadMyMarkers() {
+  if (!currentUser) {
+    myMarkers = [];
+    return;
+  }
+  const { data, error } = await db
+    .from("markers")
+    .select("*")
+    .eq("owner_username", currentUser)
+    .order("created_at", { ascending: false })
+    .maybeSingle(); // ignore if no created_at
+
+  // If created_at doesn't exist, just select without order:
+  if (error) {
+    const { data: data2 } = await db
+      .from("markers")
+      .select("*")
+      .eq("owner_username", currentUser);
+    myMarkers = data2 || [];
+  } else {
+    // when using maybeSingle, data is a single row; we want array
+    const { data: data3 } = await db
+      .from("markers")
+      .select("*")
+      .eq("owner_username", currentUser);
+    myMarkers = data3 || [];
+  }
+}
+
+//Load friends (users you have added as friends)
+async function loadFriends() {
+  if (!currentUser) {
+    friends = [];
+    return;
+  }
+  const { data, error } = await db
+    .from("friends")
+    .select("*")
+    .eq("owner_username", currentUser);
+  if (!error) friends = data || [];
+}
+
+// UI navigation
+function showPage(page) {
+  const content = document.getElementById("content");
+  const buttons = document.querySelectorAll(".nav-btn");
+  buttons.forEach(b => b.classList.remove("active"));
+
+  //Upload a photo 
+  if (page === "upload") {
+    activeFriend = null;
+    content.innerHTML = `
+      <h2 style="padding:20px;">Upload a Photo</h2>
+      <form onsubmit="addMarker(event)">
+        <input type="file" id="photoFile" accept="image/*" required>
+
+        <input id="name" placeholder="Name" required>
+        <textarea id="description" placeholder="Description" required></textarea>
+        <input id="place" placeholder="Place name (e.g. UWE Bristol)" required>
+        <textarea id="notes" placeholder="Notes"></textarea>
+
+        <button type="submit">Add Marker</button>
+      </form>
+    `;
+    buttons[0].classList.add("active");
+  }
+
+  //Map
+  if (page === "map") {
+    content.innerHTML = `<div id="map"></div>`;
+    buttons[1].classList.add("active");
+    loadMap();
+    setTimeout(refreshMapMarkers, 150);
+  }
+
+  //Friends
+  if (page === "friends") {
+    content.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:20px;">
+      <h2>Friends</h2>
+      ${
+        currentUser
+          ? `<button onclick="logout()">Logout (${currentUser})</button>`
+          : `<button onclick="openLogin()">Login</button>`
+        }
+    </div>
+      <div style="padding:20px;">
+      <h3>Add a Friend</h3>
+      <div style="position:relative;">
+  <input id="friendName" 
+         placeholder="Enter username"
+         oninput="searchUsers(this.value)"
+         autocomplete="off">
+
+   <div id="userSuggestions"
+       style=" position:absolute; top:100%; left:0; right:0; background:white;
+        border:1px solid #ccc; border-radius:6px; max-height:150px;
+        overflow-y:auto; display:none; z-index:9999; ">
+   </div>
+  </div>
+  <button onclick="addFriend()">Add Friend</button>
+      </div>
+      <div style="padding:20px;">
+        <h3>Your Friends</h3>
+      <div id="friendList"></div>
+    </div>
+
+<div id="loginModal" style=" display:none; position:fixed; top:0; left:0;
+  width:100%; height:100%; background:rgba(0,0,0,0.5); justify-content:center; align-items:center;">
+
+  <div style=" background:white; padding:20px; border-radius:8px; width:80%; max-width:300px;">
+    <h3>Login</h3>
+      <input id="loginName" placeholder="Enter username">
+      <input id="loginPassword" type="password" placeholder="Enter password">
+  <button onclick="doLogin()">Login</button>
+  <button onclick="closeLogin()" style="background:#aaa; margin-left:10px;">Cancel</button>
+  </div>
+</div>  `;
+    buttons[2].classList.add("active");
+    renderFriendList();
+  }
+}
+
+let userSearchTimeout = null;
+
+async function searchUsers(query) {
+  const box = document.getElementById("userSuggestions");
+
+  if (!query.trim()) {
+    box.style.display = "none";
+    return;
+  }
+
+  clearTimeout(userSearchTimeout);
+  userSearchTimeout = setTimeout(async () => {
+
+    const { data, error } = await db
+      .from("users")
+      .select("username")
+      .ilike("username", `${query}%`)
+      .limit(5);
+
+    if (error) {
+      console.error(error);
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      box.style.display = "none";
+      return;
+    }
+
+    box.innerHTML = "";
+    data.forEach(u => {
+      const item = document.createElement("div");
+      item.style.padding = "10px";
+      item.style.cursor = "pointer";
+      item.style.borderBottom = "1px solid #eee";
+      item.innerHTML = u.username;
+
+      item.onclick = () => {
+        document.getElementById("friendName").value = u.username;
+        box.style.display = "none";
+      };
+
+      box.appendChild(item);
+    });
+    box.style.display = "block";
+  }, 250);
+}
+//Map
+function initMap() {
+  map = new maplibregl.Map({
+    container: "map",
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.de/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          attribution: "© OpenStreetMap"
+        }
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }]
+    },
+    center: [-2.54749,51.50021], //long-lat
+    zoom: 14 // 1= Whole world  14= Centered on the coordinates
+  });
+
+  map.addControl(new maplibregl.NavigationControl(), "top-right");
+}
+
+async function loadMap() {
+  // Always destroy old map instance to avoid container issues
+  if (map) {
+    map.remove();
+    map = null;
+  }
+
+  // Wait for DOM to render the map
+  await new Promise(r => setTimeout(r, 50));
+
+  initMap();
+
+  map.on("load", async () => {
+    if (activeFriend) {
+      const { data, error } = await db
+        .from("markers")
+        .select("*")
+        .eq("owner_username", activeFriend.friend_name);
+      if (!error) {
+        activeFriend.markers = data || [];
+      } else {
+        activeFriend.markers = [];
+      }
+    } else if (currentUser) {
+      await loadMyMarkers();
+    } else {
+      myMarkers = [];
+    }
+    renderMarkers();
+  });
+}
+
+function clearMapMarkers() {
+  mapMarkers.forEach(m => m.remove());
+  mapMarkers = [];
+}
+
+function renderMarkers() {
+  if (!map) return;
+  clearMapMarkers();
+
+  const list = activeFriend ? activeFriend.markers : myMarkers;
+
+  list.forEach(m => {
+    const el = document.createElement("div");
+    el.style.width = "14px";
+    el.style.height = "14px";
+    el.style.background = activeFriend ? "#ff4081" : "#007bff";
+    el.style.borderRadius = "50%";
+    el.style.border = "2px solid white";
+
+    const marker = new maplibregl.Marker(el)//Marker text structure
+      .setLngLat([m.lng, m.lat])
+      .setPopup(
+        new maplibregl.Popup().setHTML(`
+          <b>${m.name}</b><br>
+          ${m.description}<br><br>
+          ${
+            m.photo_url
+              ? `
+              <img src="${m.photo_url}" 
+              class="popup-photo" 
+              onclick="this.classList.toggle('expanded')">
+            <br><br>
+          `
+              : ""
+          }
+          <i>${m.notes || ""}</i>
+          <br><br>
+          ${
+            !activeFriend && currentUser === m.owner_username //If the current user is not a friend allow them to delete the marker
+              ? `<button onclick="removeMarkerById('${m.id}')" 
+                   style=" background:#ff3b30; color:white; padding:6px 10px; border:none;
+                           border-radius:4px;cursor:pointer;">
+                           Remove Marker
+                 </button>`
+              : ""
+          }  `)
+       )
+      .addTo(map);
+    mapMarkers.push(marker);
+  });
+}
+
+//Add marker (photo + geocoding + DB)
+async function addMarker(event) {
+  event.preventDefault();
+  if (!currentUser) {// You have to login first before adding a marker
+    alert("You must log in first.");
+    return;
+  }
+
+  const fileInput = document.getElementById("photoFile");
+  const file = fileInput.files[0];
+
+  if (!file) {// If no file is selected this alert pops up
+    alert("Please select a photo.");
+    return;
+  }
+
+  const name = document.getElementById("name").value;
+  const desc = document.getElementById("description").value;
+  const place = document.getElementById("place").value;
+  const notes = document.getElementById("notes").value;
+
+  // Geocode
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(place)}`;
+
+  let result;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "PhotoMapApp/1.0" }
+    });
+    result = await res.json();
+  } catch {
+    alert("Error contacting geocoding service.");
+    return;
+  }
+
+  if (!result || result.length === 0) {
+    alert("Place not found.");
+    return;
+  }
+
+  const lat = parseFloat(result[0].lat); //Latitude
+  const lng = parseFloat(result[0].lon); //Longitude
+
+  // Upload photo to Supabase Storage
+  const filePath = `${currentUser}/${Date.now()}_${file.name}`;
+
+  const { data: uploadData, error: uploadError } = await db.storage
+    .from("photos")
+    .upload(filePath, file);
+
+  if (uploadError) {
+    console.error(uploadError);
+    alert("Error uploading photo.");
+    return;
+  }
+
+  const { data: publicUrlData } = db.storage
+    .from("photos")
+    .getPublicUrl(filePath);
+
+  const photoUrl = publicUrlData.publicUrl;
+
+  // Save marker to DB
+  const { data, error } = await db.from("markers").insert({
+    owner_username: currentUser,
+    lat,
+    lng,
+    name,
+    description: desc,
+    notes,
+    photo_url: photoUrl
+  }).select();
+
+  if (error) {
+    console.error(error);
+    alert("Error saving marker.");
+    return;
+  }
+
+  alert("New marker added!");
+
+  // Refresh markers in memory
+  await loadMyMarkers();
+}
+
+//Friends markers
+async function loadAllFriendsMarkers() {
+  if (!currentUser) {
+    console.log("No current user");
+    return [];
+  }
+
+  const { data: friendRows, error: friendError } = await db
+    .from("friends")
+    .select("friend_name")
+    .eq("owner_username", currentUser);
+
+  console.log("Friends:", friendRows);
+
+  if (friendError) {
+    console.error("Friend load error:", friendError);
+    return [];
+  }
+
+  if (!friendRows || friendRows.length === 0) {
+    console.log("User has no friends");
+    return [];
+  }
+
+  const friendNames = friendRows.map(f => f.friend_name);
+
+  const { data: markers, error: markerError } = await db
+    .from("markers")
+    .select("*")
+    .in("owner_username", friendNames);
+
+  console.log("Friend markers:", markers);
+
+  if (markerError) {
+    console.error("Marker load error:", markerError);
+    return [];
+  }
+  return markers || [];
+}
+
+//Render friends markers
+function renderFriendsMarkers(markers) {
+  markers.forEach(m => {
+    const el = document.createElement("div");
+    el.className = "marker";
+    el.style.width = "20px";
+    el.style.height = "20px";
+    el.style.borderRadius = "50%";
+
+    const popupHtml = `
+      <b>${m.name}</b><br>
+      ${m.description}<br>
+      ${m.notes ? m.notes + "<br>" : ""}
+      ${
+        m.photo_url
+          ? `<img src="${m.photo_url}" 
+                   class="expandable-photo" 
+                   onclick="togglePhotoSize(this)">`
+          : ""
+      }
+      <br><i>Friend: ${m.owner_username}</i>
+    `;
+
+    const markerObj = new maplibregl.Marker(el)
+      .setLngLat([m.lng, m.lat])
+      .setPopup(new maplibregl.Popup().setHTML(popupHtml))
+      .addTo(map);
+
+    window.currentMarkers.push(markerObj);
+  });
+}
+
+async function refreshMapMarkers() {
+  clearAllMarkers();
+
+  // Your markers
+  await loadMyMarkers();
+  renderMarkers();
+
+  // Friends markers
+  const friendMarkers = await loadAllFriendsMarkers();
+  renderFriendsMarkers(friendMarkers);
+}
+
+function clearAllMarkers() {
+  window.currentMarkers.forEach(m => m.remove());
+  window.currentMarkers = [];
+}
+
+function togglePhotoSize(img) {//Expand photos in markers
+  img.classList.toggle("expanded");
+}
+
+//Remove marker
+async function removeMarkerById(id) {
+  if (!currentUser) return;
+
+  const { error } = await db
+    .from("markers")
+    .delete()
+    .eq("id", id)
+    .eq("owner_username", currentUser);
+
+  if (error) {
+    console.error(error);
+    alert("Error removing marker.");
+    return;
+  }
+  await loadMyMarkers();
+  renderMarkers();
+  alert("Marker removed.");
+}
+
+//Login/logout
+function openLogin() {
+  document.getElementById("loginModal").style.display = "flex";
+}
+function closeLogin() {
+  document.getElementById("loginModal").style.display = "none";
+}
+
+async function doLogin() {
+  const username = document.getElementById("loginName").value.trim();
+  const password = document.getElementById("loginPassword").value;
+
+  if (!username || !password) {//Checks that both are inputted (|| = or)
+    alert("Enter both username and password");
+    return;
+  }
+
+  // Hash the password
+  const passwordHash = await hashPassword(password);
+
+  // Check if user exists
+  const { data: existingUser } = await db
+    .from("users")
+    .select("*")
+    .eq("username", username)
+    .maybeSingle();
+
+  if (!existingUser) {
+    // Create new user (signup)
+    const { error } = await db.from("users").insert({
+      username,
+      password_hash: passwordHash
+    });
+
+    if (error) {
+      alert("Error creating user.");
+      return;
+    }
+    currentUser = username;
+    localStorage.setItem("currentUser", currentUser);
+    closeLogin();
+    showPage("friends");
+    return;
+  }
+
+  //Incorrect password has been introduced for the existing user
+  if (existingUser.password_hash !== passwordHash) {
+    alert("Incorrect password.");
+    return;
+  }
+
+  // Login success
+  currentUser = username;
+  localStorage.setItem("currentUser", currentUser);
+  closeLogin();
+  showPage("friends");
+}
+
+//Password encryption
+async function hashPassword(password) {
+  const msgUint8 = new TextEncoder().encode(password);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+//Logout
+function logout() {
+  currentUser = null;
+  activeFriend = null;
+  localStorage.removeItem("currentUser");
+  alert("You have been logged out.");
+  showPage("friends");
+}
+
+//Does not allow you to add friends without a login
+async function addFriend() {
+  if (!currentUser) {
+    alert("You must log in first.");
+    return;
+  }
+
+  const friendName = document.getElementById("friendName").value.trim();
+  if (!friendName) {
+    alert("Enter a username.");
+    return;
+  }
+
+  //Cannot add yourself
+  if (friendName === currentUser) {
+    alert("You cannot add yourself.");
+    return;
+  }
+
+  //Check if the user exists
+  const { data: userExists, error: userError } = await db
+    .from("users")
+    .select("username")
+    .eq("username", friendName)
+    .maybeSingle();
+
+  if (userError) {
+    console.error(userError);
+    alert("Error checking user.");
+    return;
+  }
+
+  if (!userExists) {
+    alert("That user does not exist.");
+    return;
+  }
+
+  //Check if already friends
+  const { data: existingFriend } = await db
+    .from("friends")
+    .select("*")
+    .eq("owner_username", currentUser)
+    .eq("friend_name", friendName)
+    .maybeSingle();
+
+  if (existingFriend) {
+    alert("You are already friends with this user.");
+    return;
+  }
+
+  //Add friend
+  const { error } = await db.from("friends").insert({
+    owner_username: currentUser,
+    friend_name: friendName
+  });
+
+  if (error) {
+    console.error(error);
+    alert("Error adding friend.");
+    return;
+  }
+
+  await loadFriends();
+  renderFriendList();
+  alert("Friend added!");
+}
+
+//Render friend list
+function renderFriendList() {
+  const list = document.getElementById("friendList");
+  if (!list) return;
+  list.innerHTML = "";
+
+  friends.forEach((f, i) => {
+    const div = document.createElement("div");
+    div.style.padding = "10px 0";
+    div.style.borderBottom = "1px solid #ccc";
+
+    div.innerHTML = `
+    <b>${f.friend_name}</b><br>
+      <button onclick="removeFriend('${f.id}')" 
+        style="background:#ff3b30; color:white; margin-left:10px; padding:6px 10px; border:none; border-radius:4px;">
+        Delete
+      </button>
+    `;
+
+    list.appendChild(div);
+  });
+}
+
+//Remove a friend
+async function removeFriend(friendId) {
+  if (!currentUser) {
+    alert("You must log in first.");
+    return;
+  }
+
+  const { error } = await db
+    .from("friends")
+    .delete()
+    .eq("id", friendId)
+    .eq("owner_username", currentUser);
+
+  if (error) {
+    console.error(error);
+    alert("Error removing friend.");
+    return;
+  }
+
+  // Reload friend list from DB
+  await loadFriends();
+  renderFriendList();
+
+  alert("Friend removed.");
+}
+
+async function viewFriend(index) {
+  const friend = friends[index];
+  if (!friend) return;
+
+  const { data, error } = await db
+    .from("markers")
+    .select("*")
+    .eq("owner_username", friend.friend_name);
+
+  if (error) {
+    console.error(error);
+    alert("Error loading friend's markers.");
+    return;
+  }
+
+  activeFriend = {
+    friend_name: friend.friend_name,
+    markers: data || []
+  };
+
+  showPage("map");
+}
+
+// Init; deployment 
+(async function initApp() {
+  const savedUser = localStorage.getItem("currentUser");
+  if (savedUser) {
+    currentUser = savedUser;
+    await ensureUser(currentUser);
+    await loadFriends();
+    await loadMyMarkers();
+  }
+  showPage("upload");
+  })();
+   </script>
+
+  </body>
+</html>
