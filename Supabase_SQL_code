@@ -1,0 +1,30 @@
+
+-- users
+create table if not exists users (
+  id uuid primary key default gen_random_uuid(),
+  username text unique not null
+  password_hash text not null
+);
+
+-- markers
+create table if not exists markers (
+  id uuid primary key default gen_random_uuid(),
+  owner_username text not null references users(username),
+  lat double precision not null,
+  lng double precision not null,
+  name text not null,
+  description text not null,
+  notes text,
+  photo_url text
+);
+
+-- friends
+create table if not exists friends (
+  id uuid primary key default gen_random_uuid(),
+  owner_username text not null references users(username),
+  friend_name text not null
+);
+
+SELECT * FROM users; 
+SELECT * FROM markers;
+SELECT * FROM friends;
